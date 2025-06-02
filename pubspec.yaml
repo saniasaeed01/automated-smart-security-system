@@ -1,0 +1,71 @@
+name: safety
+description: "A Women's Safety Flutter App"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '^3.5.4'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  fluttertoast: ^8.0.9
+  flutter_local_notifications: ^19.2.0
+
+  # Firebase (latest compatible)
+  firebase_core: ^3.13.0
+  cloud_firestore: ^5.6.7
+  firebase_auth: ^5.5.3
+  firebase_messaging: ^15.2.5
+  # Google
+  google_sign_in: ^6.2.2
+  # google_fonts: ^6.2.1
+  google_maps_flutter: ^2.5.0
+  google_maps_flutter_web: ^0.5.4
+
+  # Location / Device
+  geolocator: ^14.0.0
+  location: ^8.0.0
+  permission_handler: ^12.0.0+1
+  shared_preferences: ^2.2.2
+  contacts_service:
+    git:
+      url: https://github.com/hkhere/flutter_contacts.git
+      ref: master
+  sound_mode:
+    git:
+      url: https://github.com/chathurach/sound_mode.git
+      ref: main
+
+  # Voice / Audio
+  record: ^6.0.0
+  speech_to_text: ^7.0.0
+
+  # App Meta
+  rename_app: ^1.6.2
+  rename: ^3.0.2
+
+  # UI
+  google_fonts: ^6.2.1
+  font_awesome_flutter: ^10.7.0
+  cupertino_icons: ^1.0.8
+  animations: ^2.0.11
+  url_launcher: ^6.1.14
+  audioplayers: ^6.4.0
+  path_provider: ^2.1.5
+  provider: ^6.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_native_splash: ^2.4.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/onboarding3.png
+    - assets/image.png
+    - assets/onboarding1.png
+    - assets/onboarding2.webp

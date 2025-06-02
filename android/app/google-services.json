@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "855982070941",
+    "project_id": "safewalkapp-ee056",
+    "storage_bucket": "safewalkapp-ee056.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:855982070941:android:15a765b56e0a51fc2c0874",
+        "android_client_info": {
+          "package_name": "com.company.safewalkapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "855982070941-k1r6njlmec76ilt3a7tfb9d7uohenu9b.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCoei2njB0YE_-UQ9Vb0cTW_sUh0-8UfCw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "855982070941-k1r6njlmec76ilt3a7tfb9d7uohenu9b.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

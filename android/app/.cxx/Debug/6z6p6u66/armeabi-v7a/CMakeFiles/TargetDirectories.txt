@@ -1,0 +1,2 @@
+D:/fiverr/safety apk error/safety/android/app/.cxx/Debug/6z6p6u66/armeabi-v7a/CMakeFiles/edit_cache.dir
+D:/fiverr/safety apk error/safety/android/app/.cxx/Debug/6z6p6u66/armeabi-v7a/CMakeFiles/rebuild_cache.dir

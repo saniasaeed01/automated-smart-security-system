@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Safe Walk Flutter App">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="safe walk">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>safe walk</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- ✅ Firebase Modular SDK Integration -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-app.js";
+    import { getAuth } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-auth.js";
+    import { getFirestore } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js";
+    import { getMessaging } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-messaging.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAp7gdzr6Q7hFmeuLVL1B5I_Z5sMhfTz5c",
+      authDomain: "safewalkapp.firebaseapp.com",
+      projectId: "safewalkapp",
+      storageBucket: "safewalkapp.appspot.com",
+      messagingSenderId: "855982070941",
+      appId: "1:855982070941:android:15a765b56e0a51fc2c0874"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    getAuth(app);
+    getFirestore(app);
+    getMessaging(app);
+  </script>
+
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
