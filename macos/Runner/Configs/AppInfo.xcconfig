@@ -8,7 +8,7 @@
 PRODUCT_NAME = safety
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.safety
+PRODUCT_BUNDLE_IDENTIFIER = com.company.safewalkapp
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2025 com.example. All rights reserved.
