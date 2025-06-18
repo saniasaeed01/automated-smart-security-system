@@ -10,6 +10,16 @@ import 'package:fluttertoast/fluttertoast.dart'; // For toast messages
 import 'package:provider/provider.dart';
 import 'package:safety/utils/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_volume_controller/flutter_volume_controller.dart';
+import 'dart:io';
+import 'package:safety/services/emergency_service.dart';
+import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'dart:convert';
+import 'dart:async';
 
 class VoiceCommandSetupPage extends StatefulWidget {
   const VoiceCommandSetupPage({super.key});
@@ -21,19 +31,25 @@ class VoiceCommandSetupPage extends StatefulWidget {
 class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
   final stt.SpeechToText _speech = stt.SpeechToText();
   final AudioPlayer _audioPlayer = AudioPlayer();
+  final EmergencyService _emergencyService = EmergencyService();
   bool _isListening = false;
   String _customCommand = '';
   double _sensitivity = 0.5;
   bool _isTestMode = false;
   bool _emergencyButtonEnabled = false;
   bool _shakeDetectionEnabled = false;
-  final bool _commandSaved = false;
   String _testModeFeedback = '';
   bool _sendLocation = false;
   String _recordedFilePath = '';
-  List<String> _savedCommands = [];
-  String? _userVoiceId; // Store user's voice ID
-  bool _isVoiceEnrolled = false; // Track if user has enrolled their voice
+  List<Map<String, dynamic>> _savedCommands = [];
+  FlutterSoundRecorder? _recorder;
+  FlutterSoundPlayer? _player;
+  bool _isRecording = false;
+  bool _isPlaying = false;
+  String? _currentlyPlayingPath;
+  DateTime? _volumeButtonPressStart;
+  bool _isVolumeButtonPressed = false;
+  StreamSubscription? _volumeSubscription;
 
   @override
   void initState() {
@@ -41,7 +57,18 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
     _initializeSpeech();
     _fetchSavedCommands();
     _loadSettings();
-    _checkVoiceEnrollment();
+    _initRecorderAndPlayer();
+    _requestPermissions();
+    _emergencyService.initialize();
+  }
+
+  @override
+  void dispose() {
+    _recorder?.closeRecorder();
+    _player?.closePlayer();
+    _speech.cancel();
+    _emergencyService.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -62,66 +89,82 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
     await prefs.setBool('shake_detection_enabled', _shakeDetectionEnabled);
     await prefs.setBool('send_location_enabled', _sendLocation);
     await prefs.setDouble('voice_sensitivity', _sensitivity);
+
+    // Update emergency service settings
+    await _emergencyService.toggleShakeDetection(_shakeDetectionEnabled);
+    await _emergencyService.toggleEmergencyButton(_emergencyButtonEnabled);
   }
 
-  Future<void> _checkVoiceEnrollment() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _userVoiceId = prefs.getString('user_voice_id');
-      _isVoiceEnrolled = _userVoiceId != null;
-    });
-  }
-
-  Future<void> _enrollVoice() async {
-    setState(() {
-      _isListening = true;
-      _testModeFeedback =
-          'Please say "My voice is my password" to enroll your voice...';
-    });
-
-    bool available = await _speech.initialize(
-      onStatus: (status) => print('Voice enrollment status: $status'),
-      onError: (error) => print('Voice enrollment error: $error'),
-    );
-
-    if (available) {
-      await _speech.listen(
-        onResult: (result) async {
-          String spokenText = result.recognizedWords.toLowerCase().trim();
-          if (spokenText.contains("my voice is my password")) {
-            // Store voice characteristics
-            final prefs = await SharedPreferences.getInstance();
-            String voiceId = DateTime.now().millisecondsSinceEpoch.toString();
-
-            // Store voice characteristics
-            await prefs.setString('user_voice_id', voiceId);
-            await prefs.setString('voice_characteristics', spokenText);
-
-            setState(() {
-              _userVoiceId = voiceId;
-              _isVoiceEnrolled = true;
-              _isListening = false;
-              _testModeFeedback = '✅ Voice enrolled successfully!';
-            });
-          } else {
-            setState(() {
-              _isListening = false;
-              _testModeFeedback =
-                  '❌ Please say exactly "My voice is my password"';
-            });
-          }
-        },
-      );
+  Future<void> _requestPermissions() async {
+    // Request microphone permission
+    var micStatus = await Permission.microphone.request();
+    if (micStatus != PermissionStatus.granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('Microphone permission is required for voice commands'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
     }
   }
 
-  void _initializeSpeech() async {
-    bool available = await _speech.initialize();
-    if (!available) {
-      // Show error message if speech recognition is not available
+  Future<void> _initializeSpeech() async {
+    try {
+      print('Initializing speech recognition...');
+
+      // First check if speech recognition is available
+      bool available = await _speech.initialize(
+        onStatus: (status) {
+          print('Speech status changed: $status');
+          if (mounted) {
+            setState(() {
+              if (status == 'listening') {
+                _isListening = true;
+                _customCommand = 'Listening...';
+              } else if (status == 'notListening') {
+                _isListening = false;
+              }
+            });
+          }
+        },
+        onError: (error) {
+          print('Speech error occurred: $error');
+          if (mounted) {
+            setState(() {
+              _isListening = false;
+              _customCommand = 'Error: ${error.errorMsg}';
+            });
+          }
+        },
+        debugLogging: true,
+      );
+
+      if (!available) {
+        print('Speech recognition not available');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Speech recognition not available on this device'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      print('Speech recognition initialized successfully');
+    } catch (e) {
+      print('Error in speech initialization: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Speech recognition not available')),
+          SnackBar(
+            content: Text('Error initializing speech: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
@@ -132,87 +175,97 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
     final themeProvider = Provider.of<ThemeProvider>(context);
     final isDarkMode = themeProvider.isDarkMode;
 
-    return Scaffold(
-      backgroundColor: isDarkMode ? Colors.grey[900] : Colors.grey[50],
-      appBar: AppBar(
-        title: Text(
-          'Voice Commands',
-          style: TextStyle(
+    return RawKeyboardListener(
+      focusNode: FocusNode(),
+      onKey: (RawKeyEvent event) {
+        if (event is RawKeyDownEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.audioVolumeDown) {
+            _volumeButtonPressStart = DateTime.now();
+            _isVolumeButtonPressed = true;
+            _checkVolumeButtonHold();
+          }
+        } else if (event is RawKeyUpEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.audioVolumeDown) {
+            _isVolumeButtonPressed = false;
+            _volumeButtonPressStart = null;
+          }
+        }
+      },
+      child: Scaffold(
+        backgroundColor: isDarkMode ? Colors.grey[900] : Colors.grey[50],
+        appBar: AppBar(
+          title: Text(
+            'Voice Commands',
+            style: TextStyle(
+              color: isDarkMode ? Colors.white : Colors.black,
+            ),
+          ),
+          backgroundColor: isDarkMode ? Colors.grey[850] : Colors.white,
+          elevation: 4,
+          shadowColor: isDarkMode ? Colors.black : Colors.grey.withOpacity(0.3),
+          iconTheme: IconThemeData(
             color: isDarkMode ? Colors.white : Colors.black,
           ),
         ),
-        backgroundColor: isDarkMode ? Colors.grey[850] : Colors.white,
-        elevation: 4,
-        shadowColor: isDarkMode ? Colors.black : Colors.grey.withOpacity(0.3),
-        iconTheme: IconThemeData(
-          color: isDarkMode ? Colors.white : Colors.black,
-        ),
-      ),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Combined Voice Command Section
-              _buildSectionCard(
-                title: 'Voice Command Setup 🛡️',
-                icon: Icons.mic,
-                child: Column(
-                  children: [
-                    // Voice Enrollment Status
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: _isVoiceEnrolled
-                            ? Colors.green.withOpacity(0.1)
-                            : Colors.orange.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color:
-                              _isVoiceEnrolled ? Colors.green : Colors.orange,
+        body: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Recording Section
+                _buildSectionCard(
+                  title: 'Record Voice Command',
+                  icon: Icons.mic,
+                  child: Column(
+                    children: [
+                      Text(
+                        _customCommand.isEmpty
+                            ? 'No command recorded yet'
+                            : _customCommand,
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: isDarkMode
+                              ? Colors.white
+                              : const Color(0xFF2196F3),
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            _isVoiceEnrolled
-                                ? Icons.check_circle
-                                : Icons.warning,
-                            color:
-                                _isVoiceEnrolled ? Colors.green : Colors.orange,
+                      const SizedBox(height: 16),
+                      if (_isRecording) ...[
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.red),
                           ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _isVoiceEnrolled
-                                  ? '✅ Voice enrolled and ready for commands'
-                                  : '⚠️ Please enroll your voice first to use voice commands',
-                              style: TextStyle(
-                                color: _isVoiceEnrolled
-                                    ? Colors.green
-                                    : Colors.orange,
-                                fontWeight: FontWeight.bold,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.mic, color: Colors.red),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Microphone Active',
+                                style: TextStyle(color: Colors.red),
                               ),
-                            ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Voice Enrollment/Re-enrollment Button
-                    if (!_isVoiceEnrolled)
+                        ),
+                        const SizedBox(height: 16),
+                      ],
                       ElevatedButton.icon(
-                        onPressed: _enrollVoice,
-                        icon: Icon(_isListening ? Icons.stop : Icons.mic),
+                        onPressed:
+                            _isRecording ? _stopRecording : _startRecording,
+                        icon: Icon(_isRecording ? Icons.stop : Icons.mic,
+                            color: isDarkMode ? Colors.white : Colors.blue),
                         label: Text(
-                            _isListening ? 'Enrolling...' : 'Enroll Voice'),
+                          _isRecording ? 'Stop Recording' : 'Record Command',
+                          style: TextStyle(
+                              color: isDarkMode ? Colors.white : Colors.blue),
+                        ),
                         style: ElevatedButton.styleFrom(
                           backgroundColor:
                               isDarkMode ? Colors.grey[850] : Colors.white,
-                          foregroundColor:
-                              isDarkMode ? Colors.white : Colors.blue,
                           padding: const EdgeInsets.symmetric(
                               horizontal: 24, vertical: 12),
                           shape: RoundedRectangleBorder(
@@ -223,238 +276,136 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
                             ),
                           ),
                         ),
-                      )
-                    else
+                      ),
+                      const SizedBox(height: 16),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          ElevatedButton.icon(
-                            onPressed: _reEnrollVoice,
-                            icon: Icon(Icons.edit),
-                            label: Text('Edit Voice'),
+                          ElevatedButton(
+                            onPressed: _customCommand.isNotEmpty &&
+                                    _customCommand !=
+                                        'No command recorded yet' &&
+                                    _customCommand !=
+                                        'Recording in progress...' &&
+                                    _recordedFilePath.isNotEmpty
+                                ? _saveCommand
+                                : null,
+                            child: const Text('Save Command'),
                             style: ElevatedButton.styleFrom(
                               backgroundColor:
                                   isDarkMode ? Colors.grey[850] : Colors.white,
                               foregroundColor:
                                   isDarkMode ? Colors.white : Colors.blue,
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 24, vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
-                                side: BorderSide(
-                                  color:
-                                      isDarkMode ? Colors.white : Colors.blue,
-                                  width: 2,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          ElevatedButton.icon(
-                            onPressed: _deleteVoiceEnrollment,
-                            icon: Icon(Icons.delete, color: Colors.red),
-                            label: Text('Delete Voice',
-                                style: TextStyle(color: Colors.red)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor:
-                                  isDarkMode ? Colors.grey[850] : Colors.white,
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 24, vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
-                                side: BorderSide(
-                                  color: Colors.red,
-                                  width: 2,
-                                ),
-                              ),
                             ),
                           ),
                         ],
                       ),
-                    const SizedBox(height: 16),
+                    ],
+                  ),
+                ),
 
-                    // Command Recording Section
-                    if (_isVoiceEnrolled) ...[
-                      Text(
-                        _customCommand.isEmpty
-                            ? 'No command recorded yet'
-                            : 'Current command: $_customCommand',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: isDarkMode ? Colors.white : Color(0xFF2196F3),
-                        ),
+                const SizedBox(height: 16),
+
+                // Saved Commands Section
+                _buildSavedCommandsSection(),
+
+                const SizedBox(height: 16),
+
+                // Sensitivity Adjustment Section
+                _buildSectionCard(
+                  title: 'Sensitivity',
+                  icon: Icons.tune,
+                  child: _buildSensitivitySlider(),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Test Mode Section
+                _buildSectionCard(
+                  title: 'Test Voice Command',
+                  icon: Icons.check_circle,
+                  child: _buildTestModeSection(),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Backup Activation Section
+                _buildSectionCard(
+                  title: 'Backup Activation',
+                  icon: Icons.security,
+                  child: Column(
+                    children: [
+                      _buildBackupOption(
+                        'Shake Detection',
+                        Icons.vibration,
+                        _shakeDetectionEnabled,
                       ),
-                      const SizedBox(height: 16),
-                      Center(
-                        child: Column(
-                          children: [
-                            ElevatedButton.icon(
-                              onPressed: _isListening
-                                  ? _stopListening
-                                  : _startRecording,
-                              icon: Icon(_isListening ? Icons.stop : Icons.mic,
-                                  color:
-                                      isDarkMode ? Colors.white : Colors.blue),
-                              label: Text(
-                                _isListening
-                                    ? 'Recording...'
-                                    : 'Record Emergency Command',
-                                style: TextStyle(
-                                    color: isDarkMode
-                                        ? Colors.white
-                                        : Colors.blue),
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: isDarkMode
-                                    ? Colors.grey[850]
-                                    : Colors.white,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 24, vertical: 12),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(20),
-                                  side: BorderSide(
-                                    color:
-                                        isDarkMode ? Colors.white : Colors.blue,
-                                    width: 2,
-                                  ),
+                      const Divider(),
+                      ListTile(
+                        leading: const Icon(Icons.volume_up,
+                            color: Color(0xFF2196F3)),
+                        title: const Text(
+                          'Volume Button SOS',
+                          style: TextStyle(color: Color(0xFF2196F3)),
+                        ),
+                        subtitle: const Text(
+                          'Hold volume down button for 3 seconds to trigger SOS',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.info_outline,
+                              color: Color(0xFF2196F3)),
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) => AlertDialog(
+                                title: const Text('Volume Button SOS'),
+                                content: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: const [
+                                    Text('To trigger SOS using volume button:'),
+                                    SizedBox(height: 8),
+                                    Text(
+                                        '• Press and hold the volume down button'),
+                                    Text('• Keep holding for 3 seconds'),
+                                    Text(
+                                        '• Your location will be sent to emergency contacts'),
+                                    Text(
+                                        '• Emergency services will be notified'),
+                                    SizedBox(height: 8),
+                                    Text(
+                                      'Note: This feature works even when the app is in the background.',
+                                      style: TextStyle(
+                                          fontStyle: FontStyle.italic),
+                                    ),
+                                  ],
                                 ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: const Text('Got it!'),
+                                  ),
+                                ],
                               ),
-                            ),
-                            const SizedBox(height: 16),
-                            ElevatedButton(
-                              onPressed: _customCommand.isNotEmpty
-                                  ? _saveCommand
-                                  : null,
-                              child: const Text('Save Command'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: isDarkMode
-                                    ? Colors.grey[850]
-                                    : Colors.white,
-                                foregroundColor:
-                                    isDarkMode ? Colors.white : Colors.blue,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _playRecordedCommand,
-                        child: const Text('Play Recorded Command'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              isDarkMode ? Colors.grey[850] : Colors.white,
-                          foregroundColor:
-                              isDarkMode ? Colors.white : Colors.blue,
+                            );
+                          },
                         ),
                       ),
                     ],
-
-                    if (_testModeFeedback.isNotEmpty)
-                      Container(
-                        margin: const EdgeInsets.only(top: 16),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: _testModeFeedback.contains('✅')
-                              ? Colors.green.withOpacity(0.1)
-                              : Colors.red.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: _testModeFeedback.contains('✅')
-                                ? Colors.green
-                                : Colors.red,
-                          ),
-                        ),
-                        child: Text(
-                          _testModeFeedback,
-                          style: TextStyle(
-                            color: _testModeFeedback.contains('✅')
-                                ? Colors.green
-                                : Colors.red,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 16),
-
-              // Display Saved Commands
-              _buildSectionCard(
-                title: 'Saved Voice Commands',
-                icon: Icons.list,
-                child: ExpansionTile(
-                  title: const Text(
-                    'Tap to view saved commands',
-                    style: TextStyle(color: Colors.grey),
                   ),
-                  children: List.generate(_savedCommands.length, (index) {
-                    return ListTile(
-                      title: Text('${index + 1}. ${_savedCommands[index]}',
-                          style: const TextStyle(color: Color(0xFF2196F3))),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete, color: Colors.red),
-                        onPressed: () {
-                          _deleteCommand(_savedCommands[index]);
-                        },
-                      ),
-                    );
-                  }),
                 ),
-              ),
 
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-              // Sensitivity Adjustment Section
-              _buildSectionCard(
-                title: 'Sensitivity',
-                icon: Icons.tune,
-                child: _buildSensitivitySlider(),
-              ),
-
-              const SizedBox(height: 16),
-
-              // Test Mode Section
-              _buildSectionCard(
-                title: 'Test Voice Command',
-                icon: Icons.check_circle,
-                child: _buildTestModeSection(),
-              ),
-
-              const SizedBox(height: 16),
-
-              // Backup Activation Section
-              _buildSectionCard(
-                title: 'Backup Activation',
-                icon: Icons.security,
-                child: Column(
-                  children: [
-                    _buildBackupOption(
-                      'Emergency Button',
-                      Icons.touch_app,
-                      _emergencyButtonEnabled,
-                    ),
-                    const Divider(),
-                    _buildBackupOption(
-                      'Shake Detection',
-                      Icons.vibration,
-                      _shakeDetectionEnabled,
-                    ),
-                  ],
+                // Live Location Trigger Section
+                _buildSectionCard(
+                  title: 'Live Location Trigger',
+                  icon: Icons.location_on,
+                  child: _buildLocationTrigger(),
                 ),
-              ),
-
-              const SizedBox(height: 16),
-
-              // Live Location Trigger Section
-              _buildSectionCard(
-                title: 'Live Location Trigger',
-                icon: Icons.location_on,
-                child: _buildLocationTrigger(),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -521,9 +472,7 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
       value: isEnabled,
       onChanged: (bool value) async {
         setState(() {
-          if (title == 'Emergency Button') {
-            _emergencyButtonEnabled = value;
-          } else if (title == 'Shake Detection') {
+          if (title == 'Shake Detection') {
             _shakeDetectionEnabled = value;
           }
         });
@@ -537,6 +486,34 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
             duration: Duration(seconds: 2),
           ),
         );
+
+        // If shake detection is enabled, show instructions
+        if (title == 'Shake Detection' && value) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text('Shake Detection Enabled'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Shake detection is now active.'),
+                  SizedBox(height: 8),
+                  Text('To trigger emergency:'),
+                  Text('• Shake your phone 3 times quickly'),
+                  Text('• Your location will be sent to emergency contacts'),
+                  Text('• Emergency services will be notified'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text('Got it!'),
+                ),
+              ],
+            ),
+          );
+        }
       },
       activeColor: Colors.blue,
       inactiveThumbColor: Colors.white,
@@ -664,205 +641,473 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
     return 'High';
   }
 
-  void _startRecording() async {
-    if (!_isListening) {
-      bool available = await _speech.initialize();
-      if (available) {
-        setState(() => _isListening = true);
-        _speech.listen(
-          onResult: (result) {
-            setState(() async {
-              _customCommand = result.recognizedWords;
-              _isListening = false;
-              _testModeFeedback = 'Command recognized! System ready.';
-              _recordedFilePath =
-                  await _saveAudioToFile(result.recognizedWords);
-            });
-          },
-        );
+  Future<void> _initRecorderAndPlayer() async {
+    try {
+      _recorder = FlutterSoundRecorder();
+      _player = FlutterSoundPlayer();
+
+      // Request microphone permission first
+      var status = await Permission.microphone.request();
+      if (status != PermissionStatus.granted) {
+        throw 'Microphone permission not granted';
+      }
+
+      // Initialize recorder
+      await _recorder!.openRecorder();
+      await _recorder!
+          .setSubscriptionDuration(const Duration(milliseconds: 10));
+
+      // Initialize player
+      await _player!.openPlayer();
+
+      print('Recorder and player initialized successfully');
+    } catch (e) {
+      print('Error initializing recorder and player: $e');
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isListening = false;
+          _customCommand = 'No speech detected';
+        });
       }
     }
   }
 
-  Future<String> _saveAudioToFile(String command) async {
-    final directory = await getApplicationDocumentsDirectory();
-    final filePath = '${directory.path}/recorded_command.wav';
-    // Here you should implement the logic to actually save the audio data
-    // For example, you might need to write the audio data to the file
-    return filePath;
-  }
-
-  void _stopListening() {
-    _speech.stop();
-    setState(() => _isListening = false);
-  }
-
-  Future<bool> _verifyVoice(String spokenText) async {
-    final prefs = await SharedPreferences.getInstance();
-    String? enrolledVoiceCharacteristics =
-        prefs.getString('voice_characteristics');
-
-    if (enrolledVoiceCharacteristics == null) {
-      print('No enrolled voice found'); // Debug print
-      return false;
-    }
-
-    print('Enrolled voice: $enrolledVoiceCharacteristics'); // Debug print
-    print('Current spoken text: $spokenText'); // Debug print
-
-    // First check if the user is enrolled
-    if (!_isVoiceEnrolled) {
-      print('User not enrolled'); // Debug print
-      return false;
-    }
-
-    // Check if the spoken text matches the enrollment phrase
-    if (!spokenText.contains("my voice is my password")) {
-      print('Spoken text does not match enrollment phrase'); // Debug print
-      return false;
-    }
-
-    // In a real implementation, you would use voice biometrics here
-    // For now, we'll use a simple check that the user is enrolled and saying the right phrase
-    bool isVoiceMatch =
-        _isVoiceEnrolled && spokenText.contains("my voice is my password");
-
-    print('Voice match result: $isVoiceMatch'); // Debug print
-    return isVoiceMatch;
-  }
-
-  void _toggleTestMode() async {
-    if (_isTestMode) {
-      await _speech.stop();
-      setState(() {
-        _isTestMode = false;
-        _testModeFeedback = '';
-      });
-    } else {
-      if (!_isVoiceEnrolled) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please enroll your voice first'),
-            backgroundColor: Colors.red,
-          ),
-        );
+  Future<void> _startRecording() async {
+    try {
+      // Check permissions first
+      var micStatus = await Permission.microphone.status;
+      if (micStatus != PermissionStatus.granted) {
+        await _requestPermissions();
         return;
       }
 
-      if (_savedCommands.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please save at least one command before testing'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
+      // Check if recorder is initialized
+      if (_recorder == null) {
+        await _initRecorderAndPlayer();
       }
 
-      bool available = await _speech.initialize(
-        onStatus: (status) => print('Test mode status: $status'),
-        onError: (error) => print('Test mode error: $error'),
+      // Get temporary directory for recording
+      Directory tempDir = await getTemporaryDirectory();
+      String filePath =
+          '${tempDir.path}/command_${DateTime.now().millisecondsSinceEpoch}.aac';
+
+      // Start recording with noise reduction
+      await _recorder!.startRecorder(
+        toFile: filePath,
+        codec: Codec.aacADTS,
+        audioSource: AudioSource.microphone,
+        enableVoiceProcessing: true,
       );
 
-      if (available) {
-        setState(() {
-          _isTestMode = true;
-          _testModeFeedback = 'Listening for command...';
-        });
+      // Update state to show recording has started
+      setState(() {
+        _isRecording = true;
+        _isListening = true;
+        _recordedFilePath = filePath;
+        _customCommand = 'Listening...';
+      });
 
-        await _speech.listen(
-          onResult: (result) async {
-            await _speech.stop();
-            await Future.delayed(Duration(milliseconds: 100));
+      // Initialize speech recognition if not already initialized
+      if (!_speech.isAvailable) {
+        await _initializeSpeech();
+      }
 
-            String spokenText = result.recognizedWords.toLowerCase().trim();
-            print('Spoken text: $spokenText'); // Debug print
-
-            // First verify the voice by asking for the enrollment phrase
-            setState(() {
-              _testModeFeedback =
-                  'Please say "My voice is my password" to verify your voice...';
-            });
-
-            bool isVoiceMatch = await _verifyVoice(spokenText);
-            print('Voice match: $isVoiceMatch'); // Debug print
-
-            if (!isVoiceMatch) {
+      // Function to start listening with retry
+      Future<void> startListening() async {
+        try {
+          await _speech.listen(
+            onResult: (result) {
               if (mounted) {
                 setState(() {
-                  _isTestMode = false;
-                  _testModeFeedback =
-                      '❌ Voice not recognized!\nPlease use your enrolled voice.\nMake sure you are speaking clearly.';
+                  if (result.recognizedWords.isNotEmpty) {
+                    _customCommand = result.recognizedWords;
+                  }
                 });
               }
-              return;
-            }
-
-            // If voice is verified, now listen for the actual command
-            setState(() {
-              _testModeFeedback = 'Voice verified! Now say your command...';
-            });
-
-            await _speech.listen(
-              onResult: (result) async {
-                await _speech.stop();
-                String commandText =
-                    result.recognizedWords.toLowerCase().trim();
-
-                // Then check if the command matches
-                bool isCommandMatch = false;
-                String matchedCommand = '';
-
-                for (String savedCommand in _savedCommands) {
-                  String normalizedSavedCommand =
-                      savedCommand.toLowerCase().trim();
-                  print(
-                      'Comparing with saved command: $normalizedSavedCommand'); // Debug print
-
-                  // More flexible matching
-                  if (commandText.contains(normalizedSavedCommand) ||
-                      normalizedSavedCommand.contains(commandText) ||
-                      _calculateSimilarity(
-                              commandText, normalizedSavedCommand) >
-                          0.7) {
-                    isCommandMatch = true;
-                    matchedCommand = savedCommand;
-                    break;
+            },
+            listenFor: const Duration(seconds: 30),
+            pauseFor: const Duration(seconds: 2),
+            partialResults: true,
+            onSoundLevelChange: (level) {
+              if (mounted) {
+                setState(() {
+                  if (level > 0.1) {
+                    _customCommand = 'Listening... (Sound detected)';
+                  } else {
+                    // If sound level is too low for 2 seconds, stop recording
+                    Future.delayed(const Duration(seconds: 2), () async {
+                      if (_isRecording && !_speech.isListening) {
+                        await _stopRecording();
+                      }
+                    });
                   }
-                }
+                });
+              }
+            },
+            cancelOnError: false,
+            listenMode: stt.ListenMode.dictation,
+            localeId: 'en_US',
+          );
+        } catch (e) {
+          // Silently retry on timeout
+          if (e.toString().contains('timeout')) {
+            await Future.delayed(const Duration(milliseconds: 500));
+            await startListening();
+          }
+        }
+      }
 
-                if (mounted) {
-                  setState(() {
-                    _isTestMode = false;
-                    if (isCommandMatch) {
-                      _testModeFeedback =
-                          '✅ Test Successful!\nVoice and command recognized correctly.\nMatched command: $matchedCommand';
-                    } else {
-                      _testModeFeedback =
-                          '❌ Command not recognized!\nVoice matched but command was incorrect.\nYou said: "$commandText"\nTry saying one of these commands: ${_savedCommands.join(", ")}';
-                    }
-                  });
-                }
-              },
+      // Start the listening process
+      await startListening();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isListening = false;
+          _customCommand = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    try {
+      if (_recorder != null && _recorder!.isRecording) {
+        await _recorder!.stopRecorder();
+      }
+
+      if (_speech.isListening) {
+        await _speech.stop();
+      }
+
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isListening = false;
+          if (_customCommand == 'Listening...' ||
+              _customCommand == 'Listening... (Sound detected)') {
+            _customCommand = '';
+          } else if (_customCommand.isNotEmpty) {
+            // Show success message when command is captured
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content:
+                    Text('✅ Command captured successfully: "$_customCommand"'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 3),
+                behavior: SnackBarBehavior.floating,
+                margin: const EdgeInsets.all(10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
             );
-          },
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isListening = false;
+          _customCommand = '';
+        });
+      }
+    }
+  }
+
+  void _saveCommand() async {
+    if (_customCommand.isEmpty ||
+        _customCommand == 'No speech detected' ||
+        _customCommand == 'Listening...' ||
+        _customCommand == 'Listening... (Sound detected)' ||
+        _recordedFilePath.isEmpty) {
+      return;
+    }
+
+    try {
+      final FirebaseFirestore firestore = FirebaseFirestore.instance;
+      String? userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) return;
+
+      // Show saving indicator
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Saving command...'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+
+      // Save to Firestore
+      await firestore
+          .collection('users')
+          .doc(userId)
+          .collection('voice_commands')
+          .doc()
+          .set({
+        'command': _customCommand,
+        'recorded_file_path': _recordedFilePath,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      // Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Command saved: "$_customCommand"'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+
+        setState(() {
+          _customCommand = '';
+          _recordedFilePath = '';
+        });
+
+        // Refresh the commands list
+        await _fetchSavedCommands();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to save command. Please try again.'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+          ),
         );
       }
     }
   }
 
-  // Add a function to calculate string similarity
-  double _calculateSimilarity(String s1, String s2) {
-    // Convert strings to sets of characters
-    Set<String> set1 = s1.split('').toSet();
-    Set<String> set2 = s2.split('').toSet();
+  Future<void> _fetchSavedCommands() async {
+    try {
+      final FirebaseFirestore firestore = FirebaseFirestore.instance;
+      String? userId = FirebaseAuth.instance.currentUser?.uid;
 
-    // Calculate intersection and union
-    Set<String> intersection = set1.intersection(set2);
-    Set<String> union = set1.union(set2);
+      if (userId == null) {
+        print('User not logged in!');
+        if (mounted) {
+          setState(() {
+            _savedCommands = []; // Clear list if no user
+          });
+        }
+        return;
+      }
 
-    // Calculate Jaccard similarity
-    return intersection.length / union.length;
+      QuerySnapshot snapshot = await firestore
+          .collection('users')
+          .doc(userId)
+          .collection('voice_commands')
+          .orderBy('timestamp', descending: true)
+          .get();
+
+      if (mounted) {
+        setState(() {
+          _savedCommands = snapshot.docs.map((doc) {
+            return {
+              'id': doc.id, // Store document ID for deletion
+              'command': doc['command'] as String,
+              'recorded_file_path': doc['recorded_file_path']
+                  as String?, // Make sure this is retrieved
+            };
+          }).toList();
+        });
+      }
+    } catch (e) {
+      print('Error fetching commands: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to load saved commands'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  void _deleteCommand(String docId) async {
+    try {
+      final FirebaseFirestore firestore = FirebaseFirestore.instance;
+      String? userId = FirebaseAuth.instance.currentUser?.uid;
+
+      if (userId == null) return;
+
+      await firestore
+          .collection('users')
+          .doc(userId)
+          .collection('voice_commands')
+          .doc(docId)
+          .delete();
+
+      // Update local state and show feedback
+      if (mounted) {
+        setState(() {
+          _savedCommands.removeWhere((cmd) => cmd['id'] == docId);
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Command deleted successfully!'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      // Re-fetch to ensure list is in sync with Firestore
+      await _fetchSavedCommands();
+    } catch (e) {
+      print('Error deleting command: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to delete command. Please try again.'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildSavedCommandsSection() {
+    return _buildSectionCard(
+      title: 'Saved Commands',
+      icon: Icons.list,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_savedCommands.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text(
+                'No commands saved yet',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            )
+          else
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _savedCommands.length,
+              itemBuilder: (context, index) {
+                final commandData = _savedCommands[index];
+                final commandText = commandData['command'] as String;
+                final recordedFilePath =
+                    commandData['recorded_file_path'] as String?;
+                final docId = commandData['id'] as String;
+
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    leading: const Icon(Icons.mic, color: Color(0xFF2196F3)),
+                    title: Text(
+                      commandText,
+                      style: const TextStyle(color: Color(0xFF2196F3)),
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (recordedFilePath != null &&
+                            recordedFilePath.isNotEmpty)
+                          IconButton(
+                            icon: Icon(
+                              _currentlyPlayingPath == recordedFilePath &&
+                                      _isPlaying
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
+                              color: Colors.blue,
+                            ),
+                            onPressed: () =>
+                                _playSpecificSavedCommand(recordedFilePath),
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => _deleteCommand(docId),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _playSpecificSavedCommand(String? filePath) async {
+    if (filePath == null || filePath.isEmpty) return;
+    if (!await File(filePath).exists()) return;
+
+    try {
+      if (_player == null) {
+        await _initRecorderAndPlayer();
+      }
+
+      // If the same file is already playing, pause it
+      if (_currentlyPlayingPath == filePath && _isPlaying) {
+        await _player!.pausePlayer();
+        setState(() {
+          _isPlaying = false;
+        });
+        return;
+      }
+
+      // If a different file is playing, stop it first
+      if (_currentlyPlayingPath != filePath && _isPlaying) {
+        await _player!.stopPlayer();
+        setState(() {
+          _isPlaying = false;
+        });
+      }
+
+      // Start playing the new file
+      await _player!.startPlayer(
+        fromURI: filePath,
+        whenFinished: () {
+          setState(() {
+            _isPlaying = false;
+            _currentlyPlayingPath = null;
+          });
+        },
+      );
+
+      setState(() {
+        _isPlaying = true;
+        _currentlyPlayingPath = filePath;
+      });
+    } catch (e) {
+      print('Error playing audio: $e');
+      setState(() {
+        _isPlaying = false;
+        _currentlyPlayingPath = null;
+      });
+    }
+  }
+
+  Future<void> _pausePlayback() async {
+    if (_player != null && _isPlaying) {
+      await _player!.pausePlayer();
+      setState(() {
+        _isPlaying = false;
+      });
+    }
+  }
+
+  Future<void> _resumePlayback() async {
+    if (_player != null && !_isPlaying && _currentlyPlayingPath != null) {
+      await _player!.resumePlayer();
+      setState(() {
+        _isPlaying = true;
+      });
+    }
   }
 
   Widget _buildTestModeSection() {
@@ -874,24 +1119,6 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
         const Text(
           'Try your saved commands to test recognition',
           style: TextStyle(fontSize: 16, color: Color(0xFF2196F3)),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Saved Commands: ${_savedCommands.join(", ")}',
-          style: TextStyle(
-            fontSize: 14,
-            color: Color(0xFF2196F3),
-            fontStyle: FontStyle.italic,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Voice Status: ${_isVoiceEnrolled ? "✅ Enrolled" : "❌ Not Enrolled"}',
-          style: TextStyle(
-            fontSize: 14,
-            color: _isVoiceEnrolled ? Colors.green : Colors.red,
-            fontWeight: FontWeight.bold,
-          ),
         ),
         const SizedBox(height: 16),
         ElevatedButton.icon(
@@ -911,279 +1138,291 @@ class _VoiceCommandSetupPageState extends State<VoiceCommandSetupPage> {
             ),
           ),
         ),
-        if (_testModeFeedback.isNotEmpty)
-          Container(
-            margin: const EdgeInsets.only(top: 16),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: _testModeFeedback.contains('✅')
-                  ? Colors.green.withOpacity(0.1)
-                  : Colors.red.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color:
-                    _testModeFeedback.contains('✅') ? Colors.green : Colors.red,
-              ),
-            ),
-            child: Text(
-              _testModeFeedback,
-              style: TextStyle(
-                color:
-                    _testModeFeedback.contains('✅') ? Colors.green : Colors.red,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
       ],
     );
   }
 
-  void _saveCommand() async {
-    if (!_isVoiceEnrolled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enroll your voice first'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-
-    final FirebaseFirestore firestore = FirebaseFirestore.instance;
-    String userId = FirebaseAuth.instance.currentUser!.uid;
-    DocumentReference commandRef = firestore
-        .collection('users')
-        .doc(userId)
-        .collection('voice_commands')
-        .doc();
-    await commandRef.set({
-      'command': _customCommand,
-      'recorded_file_path': _recordedFilePath,
-      'emergency_button_enabled': _emergencyButtonEnabled,
-      'shake_detection_enabled': _shakeDetectionEnabled,
-      'sensitivity': _sensitivity,
-      'voice_id': _userVoiceId, // Store the voice ID with the command
-      'timestamp': FieldValue.serverTimestamp(),
-    });
-    setState(() {
-      _savedCommands.add(_customCommand);
-      _customCommand = '';
-      _showSavedFeedback();
-    });
-  }
-
-  void _showSavedFeedback() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Voice command saved successfully!'),
-        backgroundColor: Colors.green,
-        duration: Duration(seconds: 2),
-      ),
-    );
-  }
-
-  void _setPredefinedCommand(String command) {
-    setState(() {
-      _customCommand = command;
-    });
-  }
-
-  void _playRecordedCommand() async {
-    if (_recordedFilePath.isNotEmpty) {
-      await _audioPlayer.play(DeviceFileSource(_recordedFilePath));
+  void _toggleTestMode() async {
+    if (_isTestMode) {
+      await _speech.stop();
+      setState(() {
+        _isTestMode = false;
+      });
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No recorded command to play.')),
-      );
-    }
-  }
-
-  // Fetch saved commands from Firebase
-  void _fetchSavedCommands() async {
-    final FirebaseFirestore firestore = FirebaseFirestore.instance;
-    String userId = FirebaseAuth.instance.currentUser!.uid;
-    QuerySnapshot snapshot = await firestore
-        .collection('users')
-        .doc(userId)
-        .collection('voice_commands')
-        .get();
-
-    setState(() {
-      _savedCommands =
-          snapshot.docs.map((doc) => doc['command'] as String).toList();
-    });
-  }
-
-  void _deleteCommand(String command) async {
-    try {
-      final FirebaseFirestore firestore = FirebaseFirestore.instance;
-      String userId = FirebaseAuth.instance.currentUser!.uid;
-
-      // Find the document to delete
-      QuerySnapshot snapshot = await firestore
-          .collection('users')
-          .doc(userId)
-          .collection('voice_commands')
-          .where('command', isEqualTo: command)
-          .get();
-
-      if (snapshot.docs.isNotEmpty) {
-        // Delete the document
-        await snapshot.docs.first.reference.delete();
-
-        // Update local state
-        if (mounted) {
-          setState(() {
-            _savedCommands.remove(command);
-          });
-
-          // Show success message
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Command deleted successfully!'),
-              backgroundColor: Colors.red,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      } else {
-        // If document not found in Firebase, still remove from local state
-        if (mounted) {
-          setState(() {
-            _savedCommands.remove(command);
-          });
-
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Command removed'),
-              backgroundColor: Colors.red,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      print('Error deleting command: $e');
-      if (mounted) {
+      if (_savedCommands.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to delete command. Please try again.'),
+          const SnackBar(
+            content: Text('Please save at least one command before testing'),
             backgroundColor: Colors.red,
-            duration: Duration(seconds: 2),
           ),
         );
+        return;
       }
-    }
-  }
-
-  Future<void> _reEnrollVoice() async {
-    // Show confirmation dialog
-    bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Edit Voice Enrollment'),
-          content: Text(
-              'Are you sure you want to re-enroll your voice? This will replace your current voice enrollment.'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: Text('Confirm'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirm == true) {
-      setState(() {
-        _isListening = true;
-        _testModeFeedback =
-            'Please say "My voice is my password" to re-enroll your voice...';
-      });
 
       bool available = await _speech.initialize(
-        onStatus: (status) => print('Voice re-enrollment status: $status'),
-        onError: (error) => print('Voice re-enrollment error: $error'),
+        onStatus: (status) {
+          if (status == 'done' || status == 'notListening') {
+            if (_isTestMode) {
+              setState(() {
+                _isTestMode = false;
+              });
+            }
+          }
+        },
+        onError: (error) {
+          setState(() {
+            _isTestMode = false;
+          });
+        },
       );
 
       if (available) {
-        await _speech.listen(
-          onResult: (result) async {
-            String spokenText = result.recognizedWords.toLowerCase().trim();
-            if (spokenText.contains("my voice is my password")) {
-              final prefs = await SharedPreferences.getInstance();
-              String voiceId = DateTime.now().millisecondsSinceEpoch.toString();
-
-              await prefs.setString('user_voice_id', voiceId);
-              await prefs.setString('voice_characteristics', spokenText);
-
-              setState(() {
-                _userVoiceId = voiceId;
-                _isVoiceEnrolled = true;
-                _isListening = false;
-                _testModeFeedback = '✅ Voice re-enrolled successfully!';
-              });
-            } else {
-              setState(() {
-                _isListening = false;
-                _testModeFeedback =
-                    '❌ Please say exactly "My voice is my password"';
-              });
-            }
-          },
-        );
+        setState(() {
+          _isTestMode = true;
+        });
+        await _startListening();
       }
     }
   }
 
-  Future<void> _deleteVoiceEnrollment() async {
-    // Show confirmation dialog
-    bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Delete Voice Enrollment'),
-          content: Text(
-              'Are you sure you want to delete your voice enrollment? You will need to re-enroll your voice to use voice commands.'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: Text('Delete', style: TextStyle(color: Colors.red)),
-            ),
-          ],
-        );
-      },
-    );
+  Future<void> _startListening() async {
+    try {
+      // Start recording first
+      Directory tempDir = await getTemporaryDirectory();
+      String testFilePath =
+          '${tempDir.path}/test_command_${DateTime.now().millisecondsSinceEpoch}.aac';
 
-    if (confirm == true) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('user_voice_id');
-      await prefs.remove('voice_characteristics');
+      if (_recorder == null) {
+        await _initRecorderAndPlayer();
+      }
 
+      // Start recording
+      await _recorder!.startRecorder(
+        toFile: testFilePath,
+        codec: Codec.aacADTS,
+        audioSource: AudioSource.microphone,
+      );
+
+      // Show recording indicator
       setState(() {
-        _userVoiceId = null;
-        _isVoiceEnrolled = false;
-        _testModeFeedback =
-            'Voice enrollment deleted. Please enroll your voice again.';
+        _isTestMode = true;
       });
 
-      // Show feedback
+      // Show recording indicator
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Voice enrollment deleted successfully'),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 2),
+        const SnackBar(
+          content: Text('Recording... Speak your command now'),
+          duration: Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
         ),
       );
+
+      // Wait for 3 seconds to record
+      await Future.delayed(const Duration(seconds: 3));
+
+      // Stop recording
+      await _recorder!.stopRecorder();
+
+      // Process the recorded audio
+      bool found = false;
+      String matched = '';
+      double bestSimilarity = 0.0;
+
+      print('Comparing audio files...');
+
+      // Get the test file size
+      File testFile = File(testFilePath);
+      int testFileSize = await testFile.length();
+
+      // If test file is too small, it means no significant audio was recorded
+      if (testFileSize < 500) {
+        // Reduced minimum size requirement
+        setState(() {
+          _isTestMode = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No command detected. Please try again.'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+
+      for (var cmd in _savedCommands) {
+        String savedAudioPath = cmd['recorded_file_path'] as String;
+        if (savedAudioPath.isNotEmpty) {
+          print('Comparing with saved audio: $savedAudioPath');
+
+          // Compare the audio files
+          double similarity =
+              await _compareAudioFiles(testFilePath, savedAudioPath);
+          if (similarity > bestSimilarity) {
+            bestSimilarity = similarity;
+            if (similarity > 0.4) {
+              // Reduced threshold from 0.6 to 0.4
+              found = true;
+              matched = cmd['command'] as String;
+              print('Audio match found with similarity: ${similarity * 100}%');
+            }
+          }
+        }
+      }
+
+      setState(() {
+        _isTestMode = false;
+        if (found) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Command matched: "$matched"'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No matching command found'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 2),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      });
+
+      // Clean up the test file
+      try {
+        File(testFilePath).delete();
+      } catch (e) {
+        print('Error deleting test file: $e');
+      }
+    } catch (e) {
+      print('Error in test mode: $e');
+      setState(() {
+        _isTestMode = false;
+      });
+    }
+  }
+
+  List<int> _createAudioFingerprint(List<int> audioData) {
+    List<int> fingerprint = [];
+    int sampleSize = 200; // Increased sample size
+
+    if (audioData.length < sampleSize) {
+      return audioData;
+    }
+
+    // Take evenly spaced samples
+    int step = audioData.length ~/ sampleSize;
+    for (int i = 0; i < sampleSize; i++) {
+      int index = i * step;
+      if (index < audioData.length) {
+        // Take average of surrounding values
+        int sum = 0;
+        int count = 0;
+        for (int j = -2; j <= 2; j++) {
+          int pos = index + j;
+          if (pos >= 0 && pos < audioData.length) {
+            sum += audioData[pos];
+            count++;
+          }
+        }
+        fingerprint.add(sum ~/ count);
+      }
+    }
+
+    return fingerprint;
+  }
+
+  Future<double> _compareAudioFiles(String file1, String file2) async {
+    try {
+      // Get file sizes
+      File f1 = File(file1);
+      File f2 = File(file2);
+
+      if (!await f1.exists() || !await f2.exists()) {
+        print('One or both files do not exist');
+        return 0.0;
+      }
+
+      int size1 = await f1.length();
+      int size2 = await f2.length();
+
+      print('File sizes - Test: $size1, Saved: $size2');
+
+      // If sizes are very different, they're probably not the same
+      if ((size1 - size2).abs() > 10000) {
+        // Increased tolerance
+        print('File sizes too different');
+        return 0.0;
+      }
+
+      // Read the audio data
+      List<int> bytes1 = await f1.readAsBytes();
+      List<int> bytes2 = await f2.readAsBytes();
+
+      // Create audio fingerprints by sampling
+      List<int> fingerprint1 = _createAudioFingerprint(bytes1);
+      List<int> fingerprint2 = _createAudioFingerprint(bytes2);
+
+      // Compare fingerprints
+      int matchCount = 0;
+      int minLength = fingerprint1.length < fingerprint2.length
+          ? fingerprint1.length
+          : fingerprint2.length;
+
+      // Calculate average values
+      double avg1 = fingerprint1.reduce((a, b) => a + b) / fingerprint1.length;
+      double avg2 = fingerprint2.reduce((a, b) => a + b) / fingerprint2.length;
+
+      // Compare relative to averages
+      for (int i = 0; i < minLength; i++) {
+        double val1 = fingerprint1[i] / avg1;
+        double val2 = fingerprint2[i] / avg2;
+        if ((val1 - val2).abs() < 0.3) {
+          // Increased tolerance from 0.2 to 0.3
+          matchCount++;
+        }
+      }
+
+      // Calculate similarity percentage
+      double similarity = matchCount / minLength;
+      print('Audio similarity: ${similarity * 100}%');
+
+      return similarity;
+    } catch (e) {
+      print('Error comparing audio files: $e');
+      return 0.0;
+    }
+  }
+
+  void _checkVolumeButtonHold() async {
+    while (_isVolumeButtonPressed) {
+      if (_volumeButtonPressStart != null) {
+        final holdDuration =
+            DateTime.now().difference(_volumeButtonPressStart!);
+        if (holdDuration.inSeconds >= 3) {
+          // Show feedback
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('SOS triggered! Sending emergency alert...'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 2),
+            ),
+          );
+
+          // Trigger emergency
+          await _emergencyService.triggerEmergencyButton();
+          _isVolumeButtonPressed = false;
+          _volumeButtonPressStart = null;
+          break;
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   }
 }

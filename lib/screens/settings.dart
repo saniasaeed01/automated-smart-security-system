@@ -21,7 +21,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   bool _isDarkMode = false;
   bool _isNotificationsEnabled = true;
-  bool _isSOSDeviceConnected = false;
+  bool _sosDeviceStatus = false;
   bool _isLocationEnabled = true;
   bool _isLoading = true;
   String userName = '';
@@ -45,16 +45,15 @@ class _SettingsPageState extends State<SettingsPage> {
         return;
       }
 
-      // Load settings from SharedPreferences first (faster)
       setState(() {
         _isDarkMode = prefs.getBool('dark_mode') ?? false;
         _isNotificationsEnabled =
             prefs.getBool('notifications_enabled') ?? true;
         _isLocationEnabled = prefs.getBool('location_enabled') ?? true;
+        _sosDeviceStatus = prefs.getBool('sos_device_status') ?? false;
         email = currentUser.email ?? '';
       });
 
-      // Then load Firestore data
       DocumentSnapshot snapshot = await FirebaseFirestore.instance
           .collection('users')
           .doc(currentUser.uid)
@@ -62,14 +61,16 @@ class _SettingsPageState extends State<SettingsPage> {
 
       if (snapshot.exists && mounted) {
         setState(() {
-          _isSOSDeviceConnected = snapshot['isSOSDeviceConnected'] ?? false;
+          _sosDeviceStatus = snapshot['sosDeviceStatus'] ?? false;
           userName = snapshot['userName'] ?? 'User';
-          _isLoading = false;
         });
 
-        // Cache the SOS device status
-        await prefs.setBool('sos_device_connected', _isSOSDeviceConnected);
+        await prefs.setBool('sos_device_status', _sosDeviceStatus);
       }
+
+      setState(() {
+        _isLoading = false;
+      });
     } catch (e) {
       print('Error loading user data: $e');
       if (mounted) {
@@ -80,44 +81,36 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _toggleSOSDevice() async {
+  Future<void> _toggleSOSDevice(bool value) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final newState = !_isSOSDeviceConnected;
-
-      // Update Firestore
       String userId = FirebaseAuth.instance.currentUser!.uid;
-      DocumentReference userRef =
-          FirebaseFirestore.instance.collection('users').doc(userId);
 
-      await userRef.update({
-        'isSOSDeviceConnected': newState,
-      });
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .update({'sosDeviceStatus': value});
 
-      // Update local state and SharedPreferences
+      await prefs.setBool('sos_device_status', value);
+
       setState(() {
-        _isSOSDeviceConnected = newState;
+        _sosDeviceStatus = value;
       });
-      await prefs.setBool('sos_device_connected', newState);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('SOS device ${newState ? 'enabled' : 'disabled'}'),
-            backgroundColor: newState ? Colors.green : Colors.grey,
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('SOS device ${value ? 'enabled' : 'disabled'}'),
+          backgroundColor: value ? Colors.green : Colors.grey,
+        ),
+      );
     } catch (e) {
       print('Error toggling SOS device: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to update SOS device status'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to update SOS device status'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -146,204 +139,13 @@ class _SettingsPageState extends State<SettingsPage> {
           : SingleChildScrollView(
               child: Column(
                 children: [
-                  Container(
-                    padding: EdgeInsets.all(16),
-                    margin: EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).cardColor,
-                      borderRadius: BorderRadius.circular(15),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 10,
-                          offset: Offset(0, 5),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      children: [
-                        CircleAvatar(
-                          radius: 50,
-                          backgroundColor:
-                              Theme.of(context).primaryColor.withOpacity(0.1),
-                          child: Icon(
-                            Icons.person,
-                            size: 50,
-                            color: Theme.of(context).primaryColor,
-                          ),
-                        ),
-                        SizedBox(height: 16),
-                        Text(
-                          userName,
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                            color: Theme.of(context).textTheme.bodyLarge?.color,
-                          ),
-                        ),
-                        SizedBox(height: 8),
-                        Text(
-                          email,
-                          style: TextStyle(
-                            fontSize: 16,
-                            color:
-                                Theme.of(context).textTheme.bodyMedium?.color,
-                          ),
-                        ),
-                        SizedBox(height: 16),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const ProfileEditPage(),
-                              ),
-                            );
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Theme.of(context).primaryColor,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(30),
-                            ),
-                          ),
-                          child: Text('Edit Profile'),
-                        ),
-                      ],
-                    ),
-                  ),
+                  _buildProfileCard(context),
                   SizedBox(height: 20),
-                  Container(
-                    margin: EdgeInsets.symmetric(horizontal: 16),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).cardColor,
-                      borderRadius: BorderRadius.circular(15),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 10,
-                          offset: Offset(0, 5),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      children: [
-                        _buildSettingItem(
-                          'Dark Mode',
-                          Icons.dark_mode,
-                          Switch(
-                            value: themeProvider.isDarkMode,
-                            onChanged: (value) {
-                              themeProvider.toggleTheme();
-                            },
-                          ),
-                        ),
-                        Divider(height: 1),
-                        _buildSettingItem(
-                          'SOS Device',
-                          Icons.security,
-                          Switch(
-                            value: _isSOSDeviceConnected,
-                            onChanged: (value) {
-                              _toggleSOSDevice();
-                            },
-                          ),
-                        ),
-                        Divider(height: 1),
-                        _buildSettingItem(
-                          'Notifications',
-                          Icons.notifications,
-                          Switch(
-                            value: _isNotificationsEnabled,
-                            onChanged: _toggleNotifications,
-                          ),
-                        ),
-                        Divider(height: 1),
-                        _buildSettingItem(
-                          'Location Services',
-                          Icons.location_on,
-                          Switch(
-                            value: _isLocationEnabled,
-                            onChanged: (value) {
-                              // Handle location services toggle
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  _buildSettingsToggles(themeProvider),
                   SizedBox(height: 20),
-                  Container(
-                    margin: EdgeInsets.symmetric(horizontal: 16),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).cardColor,
-                      borderRadius: BorderRadius.circular(15),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 10,
-                          offset: Offset(0, 5),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      children: [
-                        _buildSettingItem(
-                          'Language',
-                          Icons.language,
-                          DropdownButton<String>(
-                            value: 'English',
-                            items: ['English', 'اردو'].map((String value) {
-                              return DropdownMenuItem<String>(
-                                value: value,
-                                child: Text(value),
-                              );
-                            }).toList(),
-                            onChanged: (String? newValue) {
-                              // Handle language change
-                            },
-                          ),
-                        ),
-                        Divider(height: 1),
-                        _buildSettingItem(
-                          'About',
-                          Icons.info,
-                          Icon(Icons.arrow_forward_ios, size: 16),
-                          onTap: () {
-                            // Handle about tap
-                          },
-                        ),
-                        Divider(height: 1),
-                        _buildSettingItem(
-                          'Help & Support',
-                          Icons.help,
-                          Icon(Icons.arrow_forward_ios, size: 16),
-                          onTap: () {
-                            // Handle help & support tap
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
+                  _buildLanguageAndInfo(),
                   SizedBox(height: 20),
-                  Container(
-                    margin: EdgeInsets.symmetric(horizontal: 16),
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        await FirebaseAuth.instance.signOut();
-                        Navigator.pushReplacementNamed(context, '/login');
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(15),
-                        ),
-                      ),
-                      child: Text('Sign Out'),
-                    ),
-                  ),
+                  _buildSignOutButton(),
                   SizedBox(height: 20),
                 ],
               ),
@@ -351,12 +153,175 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _buildSettingItem(
-    String title,
-    IconData icon,
-    Widget trailing, {
-    VoidCallback? onTap,
-  }) {
+  Widget _buildProfileCard(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.all(16),
+      margin: EdgeInsets.all(16),
+      decoration: _cardDecoration(context),
+      child: Column(
+        children: [
+          CircleAvatar(
+            radius: 50,
+            backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
+            child: Icon(Icons.person,
+                size: 50, color: Theme.of(context).primaryColor),
+          ),
+          SizedBox(height: 16),
+          Text(
+            userName,
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+              color: Theme.of(context).textTheme.bodyLarge?.color,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            email,
+            style: TextStyle(
+              fontSize: 16,
+              color: Theme.of(context).textTheme.bodyMedium?.color,
+            ),
+          ),
+          SizedBox(height: 16),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const ProfileEditPage()),
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Theme.of(context).primaryColor,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(30),
+              ),
+            ),
+            child: Text('Edit Profile'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSettingsToggles(ThemeProvider themeProvider) {
+    return Container(
+      margin: EdgeInsets.symmetric(horizontal: 16),
+      decoration: _cardDecoration(context),
+      child: Column(
+        children: [
+          _buildSettingItem(
+            'Dark Mode',
+            Icons.dark_mode,
+            Switch(
+              value: themeProvider.isDarkMode,
+              onChanged: (value) => themeProvider.toggleTheme(),
+            ),
+          ),
+          Divider(height: 1),
+          _buildSettingItem(
+            'SOS Device',
+            Icons.security,
+            Switch(
+              value: _sosDeviceStatus,
+              onChanged: (value) => _toggleSOSDevice(value),
+            ),
+          ),
+          Divider(height: 1),
+          _buildSettingItem(
+            'Notifications',
+            Icons.notifications,
+            Switch(
+              value: _isNotificationsEnabled,
+              onChanged: _toggleNotifications,
+            ),
+          ),
+          Divider(height: 1),
+          _buildSettingItem(
+            'Location Services',
+            Icons.location_on,
+            Switch(
+              value: _isLocationEnabled,
+              onChanged: (value) {
+                // Implement if needed
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLanguageAndInfo() {
+    return Container(
+      margin: EdgeInsets.symmetric(horizontal: 16),
+      decoration: _cardDecoration(context),
+      child: Column(
+        children: [
+          _buildSettingItem(
+            'Language',
+            Icons.language,
+            DropdownButton<String>(
+              value: 'English',
+              items: ['English', 'اردو'].map((String value) {
+                return DropdownMenuItem<String>(
+                  value: value,
+                  child: Text(value),
+                );
+              }).toList(),
+              onChanged: (String? newValue) {
+                // Handle language change
+              },
+            ),
+          ),
+          Divider(height: 1),
+          _buildSettingItem(
+            'About',
+            Icons.info,
+            Icon(Icons.arrow_forward_ios, size: 16),
+            onTap: () {
+              // About screen logic
+            },
+          ),
+          Divider(height: 1),
+          _buildSettingItem(
+            'Help & Support',
+            Icons.help,
+            Icon(Icons.arrow_forward_ios, size: 16),
+            onTap: () {
+              // Support screen logic
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSignOutButton() {
+    return Container(
+      margin: EdgeInsets.symmetric(horizontal: 16),
+      width: double.infinity,
+      child: ElevatedButton(
+        onPressed: () async {
+          await FirebaseAuth.instance.signOut();
+          Navigator.pushReplacementNamed(context, '/login');
+        },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.red,
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+        ),
+        child: Text('Sign Out'),
+      ),
+    );
+  }
+
+  Widget _buildSettingItem(String title, IconData icon, Widget trailing,
+      {VoidCallback? onTap}) {
     return ListTile(
       leading: Icon(icon, color: Theme.of(context).primaryColor),
       title: Text(
@@ -369,6 +334,20 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       trailing: trailing,
       onTap: onTap,
+    );
+  }
+
+  BoxDecoration _cardDecoration(BuildContext context) {
+    return BoxDecoration(
+      color: Theme.of(context).cardColor,
+      borderRadius: BorderRadius.circular(15),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.1),
+          blurRadius: 10,
+          offset: Offset(0, 5),
+        ),
+      ],
     );
   }
 }

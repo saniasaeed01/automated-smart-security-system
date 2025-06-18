@@ -6,15 +6,16 @@ plugins {
 }
 
 android {
-    namespace "com.company.safewalkapp"
-    compileSdk = 35
+    namespace "com.example.safety"
+    compileSdkVersion flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
 
     defaultConfig {
-        applicationId "com.company.safewalkapp"
-        minSdk = 23
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        applicationId "com.example.safety"
+        minSdkVersion 21
+        targetSdkVersion flutter.targetSdkVersion
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
     }
 
     buildTypes {

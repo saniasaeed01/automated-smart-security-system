@@ -125,11 +125,11 @@ class _LoginScreenState extends State<LoginScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Icon(Icons.directions_walk,
+                                Icon(Icons.security,
                                     color: AppTheme.primaryBlue),
                                 SizedBox(width: 8),
                                 Text(
-                                  'SafetyWalk',
+                                  'AutoSecure',
                                   style: TextStyle(
                                     fontSize: 24,
                                     fontWeight: FontWeight.bold,

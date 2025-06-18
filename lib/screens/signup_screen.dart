@@ -121,7 +121,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           Icon(Icons.security, color: Color(0xFF2196F3)),
                           SizedBox(width: 8),
                           Text(
-                            'Safety App',
+                            'AutoSecure',
                             style: TextStyle(
                               fontSize: 24,
                               fontWeight: FontWeight.bold,

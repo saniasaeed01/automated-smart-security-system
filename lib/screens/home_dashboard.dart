@@ -11,10 +11,14 @@ import 'package:safety/screens/trusted_contacts_page.dart';
 import 'package:safety/screens/location.dart';
 import 'package:safety/screens/voice_command_setup_page.dart';
 import 'package:safety/screens/audio.dart';
+import 'package:safety/screens/emergency_test_page.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:convert';
 import 'package:provider/provider.dart';
 import 'package:safety/utils/theme_provider.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:safety/services/sms_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -44,7 +48,6 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _requestPermissions();
-    _startListeningForEmergency();
   }
 
   Future<void> _requestPermissions() async {
@@ -52,6 +55,7 @@ class _HomeScreenState extends State<HomeScreen> {
       Permission.location,
       Permission.microphone,
       Permission.contacts,
+      Permission.sms,
     ].request();
 
     // Show dialog if any permission is denied
@@ -76,6 +80,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     Text('• Microphone access for audio recording'),
                   if (statuses[Permission.contacts]?.isDenied ?? false)
                     Text('• Contacts access for emergency contacts'),
+                  if (statuses[Permission.sms]?.isDenied ?? false)
+                    Text('• SMS access for emergency alerts'),
                 ],
               ),
               actions: [
@@ -98,11 +104,6 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
     }
-  }
-
-  void _startListeningForEmergency() {
-    final audioState = _audioPage.createState();
-    audioState.startListening();
   }
 
   @override
@@ -160,11 +161,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     },
                     child: Padding(
                       padding: EdgeInsets.all(8),
-                      child: Icon(
-                        Icons.mic_outlined,
-                        color: isDarkMode ? Colors.white : Color(0xFF2196F3),
-                        size: 28,
-                      ),
+                      // child: Icon(
+                      //   Icons.mic_outlined,
+                      //   color: isDarkMode ? Colors.white : Color(0xFF2196F3),
+                      //   size: 28,
+                      // ),
                     ),
                   ),
                 ),
@@ -449,11 +450,33 @@ class _HomeScreenContentState extends State<HomeScreenContent>
                                 color: Colors.transparent,
                                 child: InkWell(
                                   onTap: () async {
-                                    final prefs =
-                                        await SharedPreferences.getInstance();
-                                    final isSOSDeviceConnected =
-                                        prefs.getBool('sos_device_connected') ??
-                                            false;
+                                    // Get current user
+                                    User? currentUser =
+                                        FirebaseAuth.instance.currentUser;
+                                    if (currentUser == null) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                              'Please log in to use this feature'),
+                                          backgroundColor: Colors.red,
+                                        ),
+                                      );
+                                      return;
+                                    }
+
+                                    // Fetch latest SOS status from Firestore
+                                    DocumentSnapshot userDoc =
+                                        await FirebaseFirestore.instance
+                                            .collection('users')
+                                            .doc(currentUser.uid)
+                                            .get();
+
+                                    bool isSOSDeviceConnected = false;
+                                    if (userDoc.exists) {
+                                      isSOSDeviceConnected =
+                                          userDoc['sosDeviceStatus'] ?? false;
+                                    }
 
                                     if (isSOSDeviceConnected) {
                                       try {
@@ -466,7 +489,9 @@ class _HomeScreenContentState extends State<HomeScreenContent>
                                         String location =
                                             'https://www.google.com/maps?q=${position.latitude},${position.longitude}';
 
-                                        // Get trusted contacts
+                                        // Get trusted contacts from SharedPreferences
+                                        final prefs = await SharedPreferences
+                                            .getInstance();
                                         final contactsJson = prefs.getString(
                                                 'trusted_contacts') ??
                                             '[]';
@@ -510,28 +535,54 @@ class _HomeScreenContentState extends State<HomeScreenContent>
                                           ),
                                         );
 
-                                        // Send WhatsApp messages
+                                        // Send SMS messages
+                                        final smsService = SMSService();
+                                        bool hasSMSPermission = await smsService
+                                            .requestSMSPermission();
+
+                                        if (!hasSMSPermission) {
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                  'SMS permission is required to send emergency alerts'),
+                                              backgroundColor: Colors.red,
+                                            ),
+                                          );
+                                          return;
+                                        }
+
                                         for (String phoneNumber
                                             in phoneNumbers) {
                                           final message = '''
-🚨 *EMERGENCY ALERT* 🚨
+🚨 EMERGENCY ALERT 🚨
 
 I need immediate help!
 
-📍 *My Location:* $location
+📍 My Location: $location
 
 ⏰ Time: ${DateTime.now().toString()}
 
 Please respond immediately!
 ''';
-                                          final Uri whatsappUri = Uri.parse(
-                                            'https://wa.me/$phoneNumber?text=${Uri.encodeComponent(message)}',
-                                          );
-                                          await launchUrl(whatsappUri,
-                                              mode: LaunchMode
-                                                  .externalApplication);
-                                          await Future.delayed(
-                                              Duration(seconds: 1));
+                                          try {
+                                            await smsService.sendEmergencySMS(
+                                                phoneNumber, message);
+                                            await Future.delayed(
+                                                Duration(seconds: 1));
+                                          } catch (e) {
+                                            print(
+                                                'Failed to send SMS to $phoneNumber: $e');
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              SnackBar(
+                                                content: Text(
+                                                    'Failed to send SMS to $phoneNumber'),
+                                                backgroundColor: Colors.red,
+                                              ),
+                                            );
+                                            continue;
+                                          }
                                         }
 
                                         // Hide loading indicator
@@ -542,7 +593,7 @@ Please respond immediately!
                                             .showSnackBar(
                                           SnackBar(
                                             content: Text(
-                                                'Emergency alert sent to ${phoneNumbers.length} contacts'),
+                                                'Emergency SMS sent to ${phoneNumbers.length} contacts'),
                                             backgroundColor: Colors.green,
                                           ),
                                         );

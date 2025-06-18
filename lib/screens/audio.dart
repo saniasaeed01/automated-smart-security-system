@@ -6,74 +6,51 @@ import 'package:permission_handler/permission_handler.dart';
 import 'dart:math' as math;
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'dart:async';
+import 'package:flutter/services.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart'
+    as android;
+import 'package:flutter/foundation.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'dart:convert';
+import 'package:safety/screens/notifications.dart';
 
 class AudioRecordPage extends StatefulWidget {
   const AudioRecordPage({super.key});
 
   @override
-  _AudioRecordPageState createState() => _AudioRecordPageState();
+  State<AudioRecordPage> createState() => _AudioRecordPageState();
 }
 
 class _AudioRecordPageState extends State<AudioRecordPage> {
   final _audioRecorder = AudioRecorder();
   bool _isRecording = false;
-  double _opacity = 1.0;
-
-  // Add voice command recognition
-  final stt.SpeechToText _speech = stt.SpeechToText();
-  bool _isListening = false;
-  String _lastWords = '';
-
-  // Trigger word that starts recording
-  final String triggerWord = "help";
+  String _recordedFilePath = '';
 
   @override
   void initState() {
     super.initState();
     _initializeRecorder();
-    _initializeSpeech();
   }
 
   Future<void> _initializeRecorder() async {
     final hasPermission = await _audioRecorder.hasPermission();
     if (!hasPermission) {
-      // Request microphone permission
-      await Permission.microphone.request();
-    }
-  }
-
-  Future<void> _initializeSpeech() async {
-    bool available = await _speech.initialize();
-    if (available) {
-      startListening();
-    }
-  }
-
-  void startListening() async {
-    if (!_isListening) {
-      bool available = await _speech.initialize();
-      if (available) {
-        setState(() => _isListening = true);
-        _speech.listen(
-          onResult: (result) {
-            // Save the recognized command
-            _lastWords = result.recognizedWords;
-            // Optionally, you can trigger an alert here
-          },
-        );
+      final status = await Permission.microphone.request();
+      if (status.isDenied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Microphone permission is required'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
-  }
-
-  void _stopListening() {
-    _speech.stop();
-    setState(() => _isListening = false);
-  }
-
-  void _triggerEmergencyAlert() {
-    // Implement your alert logic here
-    print("Emergency alert triggered!");
-    // You can navigate to an alert screen or show a notification
   }
 
   Future<void> _startRecording() async {
@@ -86,7 +63,6 @@ class _AudioRecordPageState extends State<AudioRecordPage> {
         );
         setState(() {
           _isRecording = true;
-          _opacity = 0.5;
         });
       }
     } catch (e) {
@@ -99,24 +75,17 @@ class _AudioRecordPageState extends State<AudioRecordPage> {
       final path = await _audioRecorder.stop();
       setState(() {
         _isRecording = false;
-        _opacity = 1.0;
+        _recordedFilePath = path ?? '';
       });
-      print('Audio recorded to: $path');
+      print('Audio recorded to: $_recordedFilePath');
     } catch (e) {
       print('Error stopping recording: $e');
     }
   }
 
-  void saveCommand() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('emergencyCommand', _lastWords);
-    print("Command saved: $_lastWords");
-  }
-
   @override
   void dispose() {
     _audioRecorder.dispose();
-    _stopListening();
     super.dispose();
   }
 
@@ -124,58 +93,57 @@ class _AudioRecordPageState extends State<AudioRecordPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Emergency Audio Recording'),
+        title: const Text('Audio Recording'),
         backgroundColor: Colors.pinkAccent,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
+      body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            AnimatedOpacity(
-              opacity: _opacity,
-              duration: const Duration(seconds: 1),
-              child: Icon(
-                _isRecording ? Icons.mic : Icons.mic_none,
-                size: 100,
-                color: Colors.pinkAccent,
-              ),
+            Icon(
+              _isRecording ? Icons.mic : Icons.mic_none,
+              size: 100,
+              color: _isRecording ? Colors.red : Colors.grey,
             ),
             const SizedBox(height: 20),
             Text(
-              _isRecording
-                  ? 'Recording in progress...'
-                  : 'Say "$triggerWord" to start recording',
-              style: const TextStyle(
+              _isRecording ? 'Recording...' : 'Press button to start recording',
+              style: TextStyle(
                 fontSize: 18,
-                color: Colors.pinkAccent,
+                color: _isRecording ? Colors.red : Colors.grey,
+                fontWeight: FontWeight.bold,
               ),
-              textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 40),
             ElevatedButton(
               onPressed: _isRecording ? _stopRecording : _startRecording,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.pinkAccent,
-                foregroundColor: Colors.white,
+                backgroundColor: _isRecording ? Colors.red : Colors.green,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
               ),
-              child: Text(_isRecording ? 'Stop Recording' : 'Start Recording'),
-            ),
-            const SizedBox(height: 40),
-            Text(
-              'Tip: The recording will start automatically when you say "$triggerWord"',
-              style: const TextStyle(
-                fontSize: 16,
-                color: Colors.black,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_isRecording ? Icons.stop : Icons.mic),
+                  const SizedBox(width: 8),
+                  Text(_isRecording ? 'Stop Recording' : 'Start Recording'),
+                ],
               ),
-              textAlign: TextAlign.center,
             ),
+            if (_recordedFilePath.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Text(
+                'Last recording saved at:\n$_recordedFilePath',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey,
+                ),
+              ),
+            ],
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _isRecording ? _stopRecording : _startRecording,
-        child: Icon(_isRecording ? Icons.stop : Icons.mic),
       ),
     );
   }

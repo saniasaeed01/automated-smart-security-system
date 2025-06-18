@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   cloud_firestore
   firebase_auth
   firebase_core
+  flutter_volume_controller
   geolocator_windows
   permission_handler_windows
   record_windows
